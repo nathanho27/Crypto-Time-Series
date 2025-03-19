@@ -1,0 +1,179 @@
+---
+title: "PSTAT 174 Final Project"
+author: "Nathan Ho"
+date: "2025-03-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load in and Explore Data
+Original dataset contains Nvidia stock closing prices from 2018 - 2024
+New dataset includes Nvidia stock closing prices from January 2022 to September 2024.
+```{r}
+library(astsa)
+library(tseries)
+library(timeSeries)
+library(forecast)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(fGarch)
+library(rugarch)
+library(pander)
+
+NVDA <- read.csv("~/Downloads/NVIDIA_STOCK.csv") %>%
+  rename(Date = Price)
+
+NVDA <- NVDA %>%
+  mutate(Date = as.Date(Date, format="%Y-%m-%d")) %>%
+  filter(Date >= as.Date("2022-01-03") & Date <= as.Date("2024-09-30")) %>%
+  arrange(Date)
+
+ClosingPrice <- NVDA$Close
+
+NVDAts <- ts(as.numeric(ClosingPrice), start = c(2022, 1), frequency = 252)
+
+plot(NVDAts, 
+     main="Time Series of NVIDIA (NVDA) Closing Stock Price \n Jan 2022 - Sep 2024", 
+     ylab="Closing Price (USD)", 
+     xlab="Time")
+
+NVDAts <- as.numeric(NVDAts)
+```
+Interpretation:
+1. Strong Upward Trend:
+- Stock price has been increasing over time
+- Suggests a long-term growth in Nvidia's stock
+
+2. Exponential Growth Pattern:
+- Growth accelerates sharply after mid 2023, suggesting possible non-linear
+- Suggests that a log transformation is needed
+
+3. Non-Stationary Data:
+- The trend suggests that the data is not stationary, meaning that differencing would be required before fitting an ARIMA model. 
+- Exponential increase suggests log transformation is necessary to stabilize variance.
+
+# Check for Stationarity
+Use Augmented Dickey-Fuller (ADF) test to test stationarity
+```{r}
+adf.test(NVDAts)
+acf2(NVDAts, 25, main = "ACF/PACF of NVDA Closing Prices")
+```
+Interpretation:
+1. Non-Stationary Data: 
+The ADF test p-value = 0.6194 is greater than 0.05, which means that we fail to reject the null hypothesis of stationarity
+Meaning: Stock prices exhibit a trend and require differencing before fitting an ARIMA model.
+First-order differencing (d=1) is required to remove the trend and make the data stationary.
+
+## Transform
+Log Transformation: reduces the heteroskedasticity and helps stabilize variance. Making trends more linear, improving model performance. 
+```{r}
+NVDALog <- log(NVDAts)
+plot(NVDALog, 
+     main="Log Time Series of NVIDIA (NVDA) Closing Stock Price", 
+     ylab="Closing Price (USD)", 
+     xlab="Time", 
+     type="l")
+```
+
+First order differencing is used to remove trends and make data stationary. NVidia's stock price has a strong long-term trend and differencing is needed to model short term fluctuations effectively.
+```{r}
+NVDALogDiff = diff(log(NVDAts))
+adf.test(NVDALogDiff)
+plot(NVDALogDiff, 
+     main="First Difference of Log NVIDIA (NVDA) Closing Stock Price", 
+     ylab="Closing Price (USD)", 
+     xlab="Time", 
+     type="l")
+acf2(NVDALogDiff, 25, main = "ACF and PACF of First Difference Log Price")
+```
+p-value = 0.01 reject the null hypothesis (now stationary)
+ACF and PACF analysis
+Autocorrelation Function (ACF):
+- Strong correlation at multiple lags, confirming that there is dependence between stock prices over time
+- Gradual decay suggests a moving average (MA) component is necessary
+Partial Autocorrelation Function (PACF):
+- First lag is significant, indicating the need for autoregressive (AR) terms
+Key Insight: Both ACF and PACF indicate the presence of short-term memory effects, meaning SARIMA modeling is appropriate
+
+# Testing different models for ACF/PACFs
+```{r}
+Sarima1 <- sarima(NVDAts, p=1, d=1, q=1)
+summary(arima(NVDAts, order=c(1,1,1)))
+
+Sarima2 <- sarima(NVDAts, p=0, d=1, q=1)
+summary(arima(NVDAts, order=c(0,1,1)))
+
+Sarima3 <- sarima(NVDAts, p=1, d=1, q=2)
+summary(arima(NVDAts, order=c(1,1,2)))
+
+Sarima4 <- sarima(NVDAts, p=2, d=1, q=1)
+summary(arima(NVDAts, order=c(2,1,1)))
+```
+
+# Auto arima to confirm (1,1,1)
+```{r}
+NVDASarima <- arima(NVDAts, order = c(1,1,1))
+FcastNVDA <- forecast(NVDASarima, h=252)
+plot(FcastNVDA, main="ARIMA(1,1,1) Forecast", 
+     ylab="Closing Price (USD)", xlab="Time")
+```
+Best Model: Arima (1,1,1) with drift
+
+Nvidia's stock price follows a first-order difference ARIMA process with one AR term and one MA term.
+Drift term indicates a consistent upward trend in Nvidia stock over time.
+Model Residual Diagnostics
+- Residuals from ARIMA(1,1,1) with drift:
+- Ljung-Box test (p = 0.033) suggests minor residual autocorrelation
+- Residuals appear to be randomly distributed.
+
+## Sarima Forecast
+```{r}
+FcastNVDA <- forecast(NVDASarima, h=252)
+plot(FcastNVDA, main="ARIMA(1,1,1) Forecast", 
+     ylab="Closing Price (USD)", xlab="Time")
+```
+252 day (1-year) forecast using SARIMA (1,1,1) with drift.
+Forecasted values show continued growth.
+Confidence Intervals (80%, 95%) widen over time, meaning uncertainty increases as we project further.
+Nvidia's stock is projected to continue its strong growth trend.
+Potential volatility is reflected in the widening confidence bands.
+
+## Garch
+```{r}
+NVDAarma <- arima(NVDALogDiff, order = c(1,1,1))
+residuals <- residuals(NVDAarma)
+squaredresiduals = residuals^2
+acf2(squaredresiduals, 25, main = "ACF/PACF of Squared Residuals")
+```
+
+```{r}
+library(fGarch)
+
+NVDAGarch1 <- garchFit(~ arma(1,1) + garch(1,1), data=NVDALogDiff, cond.dist="std")
+
+NVDAGarch2 <- garchFit(~ arma(1,1) + garch(1,0), data=NVDALogDiff, cond.dist="std")
+
+NVDAGarch3 <- garchFit(~ arma(0,0) + garch(1,0), data=NVDALogDiff, cond.dist="std")
+
+summary(NVDAGarch1)
+summary(NVDAGarch2)
+summary(NVDAGarch3)
+```
+
+```{r}
+par(mfrow=c(1,2))
+plot(NVDAGarch1, which = c(1,3,9,10))
+plot(NVDAGarch1, which =13)
+```
+
+```{r}
+ForecastGARCH <- predict(NVDAGarch1, n.ahead = 252, plot=TRUE)
+summary(ForecastGARCH)
+```
+
